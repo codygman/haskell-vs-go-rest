@@ -1,6 +1,6 @@
 Contains the haskell parts of my haskell (wai/mysql-simple & servant/persistent) vs Go (martini/go-sql-driver)
 
-Will upload the Go part soon.
+Will upload the Go part soon. (update: The Go portion is in a separate repo https://github.com/codygman/martini-rest-example)
 
 The haskell part uses an updated version of the mysql library that uses proper concurrency, see: https://ro-che.info/articles/2015-04-17-safe-concurrent-mysql-haskell
 
@@ -13,3 +13,8 @@ I created this because (perhaps due to my own stupidity) I created a Servant/Per
 - Fixing performance problems in these database libraries
 - Figuring out why my implementation wasn't performant just by following tutorials while the Go version was this.
 - ????
+
+
+TODO: add mysql fork as submodule
+TODO: add go program as submodule
+TOOD: update instructions to pull/sync submodules
