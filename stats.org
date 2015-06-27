@@ -1,0 +1,213 @@
+* Go
+** Martini/gorp/go-sql-driver
+*** results
+Running 5s test @ http://127.0.0.1:8080/api/v1/test/1
+  4 threads and 150 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     4.52ms    2.24ms  24.20ms   63.46%
+    Req/Sec     8.26k   684.06     8.87k    96.00%
+  164388 requests in 5.01s, 19.91MB read
+  Non-2xx or 3xx responses: 164388
+Requests/sec:  32829.05
+Transfer/sec:      3.98M
+*** code
+#+begin_src go
+package main
+
+import (
+	"github.com/gin-gonic/gin"
+	"database/sql"
+	_ "github.com/go-sql-driver/mysql"
+	"gopkg.in/gorp.v1"
+	"log"
+	"fmt"
+)
+
+type Test struct {
+	Key int64 `db:"key"`
+	Desc string `db:"desc"`
+}
+
+
+func checkErr(err error, msg string) {
+	if err != nil {
+		log.Fatalln(msg, err)
+	}
+}
+
+func main() {
+	r := gin.Default()
+
+	v1 := r.Group("api/v1")
+	{
+		v1.GET("/tests/:id", GetTest)
+
+	}
+	r.Run(":8080")
+}
+
+var dbmap = initDb()
+
+func initDb() *gorp.DbMap {
+	dbUserName := "cody"
+	dbPassword := ""
+	dbHost := "localhost"
+	dbName := "test"
+	connStr := fmt.Sprintf("%s:%s@tcp(%s:3306)/%s?parseTime=true", dbUserName, dbPassword, dbHost, dbName)
+	db, err := sql.Open("mysql", connStr)
+	checkErr(err, "sql.Open failed")
+	
+	dbmap := &gorp.DbMap{Db: db, Dialect:           gorp.MySQLDialect{"InnoDB", "UTF8"}}
+	checkErr(err, "Create table failed")
+	return dbmap
+}
+
+func GetTest(c *gin.Context) {
+	id := c.Params.ByName("id")
+	var test Test
+	err := dbmap.SelectOne(&test, "SELECT `desc` FROM `test` WHERE `key`=?", id)
+
+	if err == nil {
+		c.String(200, test.Desc)
+	}
+
+}
+#+end_src
+* Haskell
+** wai/warp/mysql-simple (roche concurrent mysql modifications)
+modifications: 
+*** results
+~/source/unsorted/wrk $ ./wrk -c150 -d5 -t4 http://127.0.0.1:8000/1
+Running 5s test @ http://127.0.0.1:8000/1
+  4 threads and 150 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    48.95ms  155.24ms   1.44s    93.63%
+    Req/Sec     3.20k     1.04k    9.03k    88.72%
+  62021 requests in 5.01s, 8.99MB read
+Requests/sec:  12380.63
+Transfer/sec:      1.79MB
+*** code
+#+begin_src haskell
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes        #-}
+import           Control.Concurrent       (forkOS)
+import           Control.Exception        (bracket)
+import           Control.Monad            (void)
+import           Data.Monoid              (mempty)
+import           Data.Pool                (Pool, createPool,
+                                           destroyAllResources, withResource)
+import qualified Data.Text.Lazy.Encoding  as LT
+import qualified Database.MySQL.Base      as MySQL
+import           Database.MySQL.Simple
+import           GHC.IO                   (unsafeUnmask)
+import           Network.HTTP.Types
+import           Network.Wai
+import qualified Network.Wai.Handler.Warp as Warp
+
+main :: IO ()
+main = do
+  MySQL.initLibrary
+  bracket mkPool destroyAllResources $ \pool ->
+    Warp.runSettings (Warp.setPort 8000 . Warp.setFork forkOSWithUnmask $ Warp.defaultSettings) $
+      \req resp -> do
+        MySQL.initThread
+        withResource pool $ \conn ->
+          case pathInfo req of
+            [key] -> do
+              rs <- query conn "SELECT `desc` FROM `test` WHERE `key` = ?"
+                (Only key)
+              case rs of
+                Only result : _ -> resp $
+                  responseLBS
+                    ok200
+                    [(hContentEncoding, "text/plain")]
+                    (LT.encodeUtf8 result)
+                _ -> resp e404
+            _ -> resp e404
+
+  where
+    mkPool = createPool (connect defaultConnectInfo { connectUser = "cody" }) close 1 60 10
+    e404 = responseLBS notFound404 [] mempty
+    forkOSWithUnmask :: ((forall a . IO a -> IO a) -> IO ()) -> IO ()
+    forkOSWithUnmask io = void $ forkOS (io unsafeUnmask)
+#+end_src
+
+
+
+
+
+** Servant/Persistent mysql
+*** results
+~/source/unsorted/wrk $ ./wrk -c150 -d5 -t4 http://127.0.0.1:8080/test/1
+Running 5s test @ http://127.0.0.1:8080/test/1
+  4 threads and 150 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    28.69ms   49.58ms 635.76ms   96.76%
+    Req/Sec     1.74k   359.48     2.50k    75.88%
+  34491 requests in 5.01s, 5.33MB read
+Requests/sec:   6885.58
+Transfer/sec:      1.06MB
+** code
+#+begin_src haskell
+{-# LANGUAGE DataKinds                  #-}
+{-# LANGUAGE EmptyDataDecls             #-}
+{-# LANGUAGE FlexibleContexts           #-}
+{-# LANGUAGE GADTs                      #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE MultiParamTypeClasses      #-}
+{-# LANGUAGE OverloadedStrings          #-}
+{-# LANGUAGE QuasiQuotes                #-}
+{-# LANGUAGE TemplateHaskell            #-}
+{-# LANGUAGE TypeFamilies               #-}
+{-# LANGUAGE TypeOperators              #-}
+
+import           Control.Monad
+import           Control.Monad.IO.Class     (MonadIO, liftIO)
+import           Control.Monad.Logger
+import           Control.Monad.Trans.Either
+import           Data.Text                  (Text)
+import qualified Data.Text                  as T
+import qualified Data.Text.Lazy             as LT
+import qualified Data.Text.Lazy.Encoding    as TE
+import           Database.Persist
+import           Database.Persist.MySQL
+import           Database.Persist.TH
+import           Network.Wai
+import           Network.Wai
+import           Network.Wai.Handler.Warp
+import           Servant
+
+share [mkPersist sqlSettings, mkMigrate "migrateAll"] [persistLowerCase|
+Test
+    Id sql=key
+    desc Text Maybe
+    deriving Show
+|]
+
+-- TODO: This is probably horrible performance-wise for Text -> Lazy.ByteString
+instance MimeRender PlainText Test where
+  mimeRender Proxy (Test desc) = case desc of
+    Just d -> TE.encodeUtf8 (LT.fromStrict d)
+
+type TestAPI = "test" :> Capture "test_id" Int :> Get '[PlainText] Test
+
+testAPI :: Proxy TestAPI
+testAPI = Proxy
+
+server :: ConnectionPool -> Server TestAPI
+server pool = getTestById pool
+
+app :: ConnectionPool -> Application
+app pool = serve testAPI (server pool)
+
+getTestById :: MonadIO m => ConnectionPool -> t -> m (Test)
+getTestById pool id = do
+  mtest <- liftIO . flip runSqlPersistMPool pool $ selectFirst [] []
+  case mtest of
+    Just (Entity testId test) -> return (test)
+    Nothing -> error "TODO: error code/not found message"
+
+main = runNoLoggingT . withMySQLPool dbInfo 400 $ \pool -> do
+         liftIO $ run 8080 (app pool)
+  where dbInfo = defaultConnectInfo { connectUser = "cody" }
+#+end_src
